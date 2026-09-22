@@ -68,7 +68,7 @@ class RT_Admin {
         fputcsv( $out, [ 'ID', 'Date', 'Type', 'Channel', 'Page URL', 'UTM Source', 'UTM Medium', 'Campaign', 'Form Plugin', 'Referrer' ] );
 
         foreach ( $rows as $row ) {
-            fputcsv( $out, [
+            fputcsv( $out, array_map( [ $this, 'csv_safe_cell' ], [
                 $row['id'],
                 $row['created_at'],
                 $row['event_type'],
@@ -79,11 +79,25 @@ class RT_Admin {
                 $row['utm_campaign'] ?? '',
                 $row['form_plugin'] ?? '',
                 $row['referrer'] ?? '',
-            ] );
+            ] ) );
         }
 
         fclose( $out );
         exit;
+    }
+
+    /**
+     * Neutralize CSV/formula injection: several row values (UTM params, referrer)
+     * are attacker-controllable via the public tracking endpoints. A value starting
+     * with =, +, -, @, tab, or CR is interpreted as a formula by Excel/Sheets when
+     * the export is opened, so prefix those with a single quote to force text mode.
+     */
+    private function csv_safe_cell( $value ): string {
+        $value = (string) $value;
+        if ( $value !== '' && in_array( $value[0], [ '=', '+', '-', '@', "\t", "\r" ], true ) ) {
+            return "'" . $value;
+        }
+        return $value;
     }
 
     public function handle_retention(): void {

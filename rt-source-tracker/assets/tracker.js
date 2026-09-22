@@ -54,6 +54,7 @@
     function classify( referrer, utm, gclid, fbclid ) {
         let refHost = '';
         try { refHost = referrer ? new URL( referrer ).hostname.toLowerCase() : ''; } catch (_) {}
+        if ( refHost && refHost === window.location.hostname.toLowerCase() ) refHost = '';
         const src     = ( utm.source || '' ).toLowerCase();
         const med     = ( utm.medium || '' ).toLowerCase();
 
@@ -155,6 +156,10 @@
             gclid:        gclid,
             fbclid:       fbclid,
             session_id:   sessionId,
+            // Session-inherited channel (see isSameOrigin block above) — lets the
+            // server preserve the original first-touch channel across same-site
+            // navigation instead of reclassifying from a same-site referrer alone.
+            channel:      channel,
         }, extra );
 
         const url     = cfg.restUrl + endpoint;

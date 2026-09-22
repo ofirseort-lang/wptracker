@@ -223,7 +223,13 @@
         <span><?php esc_html_e( 'Showing traffic referred by:', 'rt-source-tracker' ); ?>
             <strong><?php echo esc_html( $filters['referrer_domain'] ); ?></strong>
         </span>
-        <a href="<?php echo esc_url( admin_url( 'tools.php?' . http_build_query( array_filter( array_diff_key( $filter_args, [ 'referrer_domain' => '' ] ) ) ) ) ); ?>"
+        <?php
+        $clear_filter_args = array_diff_key( $filter_args, [ 'referrer_domain' => '' ] );
+        if ( $tab === 'sessions' ) {
+            $clear_filter_args['tab'] = 'sessions';
+        }
+        ?>
+        <a href="<?php echo esc_url( admin_url( 'tools.php?' . http_build_query( array_filter( $clear_filter_args ) ) ) ); ?>"
            style="color:#c0392b;text-decoration:none;font-size:12px;">&#10005; <?php esc_html_e( 'Clear filter', 'rt-source-tracker' ); ?></a>
     </div>
     <?php endif; ?>

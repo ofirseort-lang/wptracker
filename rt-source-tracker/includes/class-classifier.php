@@ -67,6 +67,14 @@ class RT_Classifier {
         $utm_medium = strtolower( trim( $utm['medium'] ?? '' ) );
         $referrer_host = $referrer ? strtolower( (string) parse_url( $referrer, PHP_URL_HOST ) ) : '';
 
+        // A same-site referrer (internal navigation, e.g. a link opened in a new tab
+        // with no prior session data to inherit from) isn't an external source — treat
+        // it as if there were no referrer so it falls through to any UTM/click-id
+        // signal present, or 'direct', instead of being mislabeled 'referral'.
+        if ( $referrer_host && self::is_own_host( $referrer_host ) ) {
+            $referrer_host = '';
+        }
+
         // --- LLM / AI engines ---
         if ( self::matches_domain_list( $referrer_host, self::$llm_domains )
             || self::matches_domain_list( $utm_source, self::$llm_domains ) ) {
@@ -146,6 +154,27 @@ class RT_Classifier {
             }
         }
         return false;
+    }
+
+    /**
+     * Whether $host (already lowercased) is this site's own host. Checks both the
+     * configured home_url() and the Host header of the current request, since a
+     * site reachable under more than one hostname (www vs. non-www, a staging
+     * alias, a mapped domain) would otherwise have document.referrer's host never
+     * match a home_url()-only comparison for perfectly ordinary internal navigation.
+     * Shared by RT_Tracker::record_event() so both places agree on "same site".
+     */
+    public static function is_own_host( string $host ): bool {
+        if ( ! $host ) {
+            return false;
+        }
+        $known_hosts = [
+            strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) ),
+        ];
+        if ( ! empty( $_SERVER['HTTP_HOST'] ) ) {
+            $known_hosts[] = strtolower( sanitize_text_field( wp_unslash( $_SERVER['HTTP_HOST'] ) ) );
+        }
+        return in_array( $host, array_filter( $known_hosts ), true );
     }
 
     public static function channel_label( string $channel ): string {

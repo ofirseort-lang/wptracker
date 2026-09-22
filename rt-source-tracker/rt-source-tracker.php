@@ -3,12 +3,29 @@
  * Plugin Name: RT Source Tracker
  * Plugin URI:  https://realtimecollege.co.il
  * Description: Tracks visitor traffic sources (organic, paid, social, LLM/AI) on every page and ties them to form submissions. Supports CF7, Gravity Forms, WPForms, and generic HTML forms.
- * Version:     1.1.0
+ * Version:     1.1.1
  * Author:      Real Time College
  * License:     GPL-2.0-or-later
  * Text Domain: rt-source-tracker
  *
  * Changelog:
+ *   1.1.1 - Fixed a 1.1.0 regression where a bot's REST submission could claim the
+ *           dedup slot and suppress the real form-hook row (bot check now runs
+ *           before the dedup claim); added the same bot-skip guard to the
+ *           form-hook fallback path, which had none; entry_page in the sessions
+ *           report now respects the active date/channel/bot filters again;
+ *           CF7 fallback now fires on wpcf7_submit (covers failed-mail
+ *           submissions, not just successfully-mailed ones); fixed retention
+ *           purge comparing a UTC cutoff against site-local timestamps; same-site
+ *           referrers no longer misclassify as "referral", and tracker.js now
+ *           sends its session-inherited channel so internal navigation keeps the
+ *           original first-touch source (same-site check now shared via
+ *           RT_Classifier::is_own_host(), covering both home_url() and the actual
+ *           request Host header); a bogus source_channel value from the form-hook
+ *           hidden field is no longer stored verbatim; CSV export neutralizes
+ *           formula-injection payloads; rate limiting is atomic when a persistent
+ *           object cache is active, using wp_cache_add()+incr() so the counter
+ *           reliably gets its expiry on creation regardless of backend.
  *   1.1.0 - Hardened client-IP resolution (proxy headers no longer trusted by
  *           default, closing a rate-limit bypass); tiered rate limits based on
  *           REST nonce validity; added rtst_record_bot_events filter to skip
@@ -20,7 +37,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'RTST_VERSION', '1.1.0' );
+define( 'RTST_VERSION', '1.1.1' );
 define( 'RTST_PLUGIN_FILE', __FILE__ );
 define( 'RTST_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'RTST_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

@@ -182,8 +182,14 @@ class RT_Database {
 
     public static function purge_events_older_than( int $days ): int {
         global $wpdb;
-        $table  = self::table();
-        $cutoff = gmdate( 'Y-m-d H:i:s', strtotime( "-{$days} days" ) );
+        $table = self::table();
+        // created_at is stored via current_time('mysql'), which is site-local wall
+        // clock formatted as if it were UTC (WP's convention, see current_time()).
+        // Comparing it against a true-UTC gmdate()/strtotime() cutoff drifts by the
+        // site's UTC offset. current_time('timestamp') carries that same "local wall
+        // clock" adjustment, so subtracting days from it and formatting with gmdate()
+        // (not date(), to avoid re-applying the offset) lines back up with created_at.
+        $cutoff = gmdate( 'Y-m-d H:i:s', current_time( 'timestamp' ) - ( $days * DAY_IN_SECONDS ) );
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} WHERE created_at < %s", $cutoff ) );
         return (int) $wpdb->rows_affected;
@@ -192,14 +198,20 @@ class RT_Database {
     public static function get_sessions( array $filters = [], int $page = 1, int $per_page = 20 ): array {
         global $wpdb;
         $table  = self::table();
-        $where  = self::build_session_where( $filters );
+        $clauses = self::session_filter_clauses( $filters );
+        $where  = 'WHERE session_id IS NOT NULL' . ( $clauses ? ' AND ' . implode( ' AND ', $clauses ) : '' );
         $offset = ( $page - 1 ) * $per_page;
 
         // entry_page used to be pulled via GROUP_CONCAT(page_url ORDER BY created_at) +
-        // SUBSTRING_INDEX, which concatenates every page_url in the session before
-        // taking the first one — expensive for long sessions and repeated on every
-        // 30s admin auto-refresh. A correlated subquery (backed by
-        // idx_session_created) only ever reads the one row it needs.
+        // SUBSTRING_INDEX, which concatenates every page_url matching the *same*
+        // filters before taking the first one — expensive for long sessions and
+        // repeated on every 30s admin auto-refresh. A correlated subquery (backed by
+        // idx_session_created) only ever reads the one row it needs, but must apply
+        // the same date/channel/bot filters or it can surface an entry page from
+        // outside the filtered window.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $subquery_where = $clauses ? ' AND ' . implode( ' AND ', $clauses ) : '';
+
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         return $wpdb->get_results(
             $wpdb->prepare(
@@ -212,7 +224,7 @@ class RT_Database {
                     SUM(e.event_type = 'submission') AS submissions,
                     (
                         SELECT e2.page_url FROM {$table} e2
-                        WHERE e2.session_id = e.session_id
+                        WHERE e2.session_id = e.session_id {$subquery_where}
                         ORDER BY e2.created_at ASC
                         LIMIT 1
                     ) AS entry_page
@@ -230,15 +242,21 @@ class RT_Database {
 
     public static function count_sessions( array $filters = [] ): int {
         global $wpdb;
-        $table = self::table();
-        $where = self::build_session_where( $filters );
+        $table   = self::table();
+        $clauses = self::session_filter_clauses( $filters );
+        $where   = 'WHERE session_id IS NOT NULL' . ( $clauses ? ' AND ' . implode( ' AND ', $clauses ) : '' );
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         return (int) $wpdb->get_var( "SELECT COUNT(DISTINCT session_id) FROM {$table} {$where}" );
     }
 
-    private static function build_session_where( array $filters ): string {
+    /**
+     * Session-scoped filter clauses, shared between get_sessions()'s outer query and
+     * its per-session entry_page subquery so both agree on which rows are in scope.
+     * Each clause is already $wpdb->prepare()-escaped where it embeds a value.
+     */
+    private static function session_filter_clauses( array $filters ): array {
         global $wpdb;
-        $clauses = [ 'session_id IS NOT NULL' ];
+        $clauses = [];
 
         if ( ! empty( $filters['date_from'] ) ) {
             $clauses[] = $wpdb->prepare( 'created_at >= %s', $filters['date_from'] . ' 00:00:00' );
@@ -253,7 +271,7 @@ class RT_Database {
             $clauses[] = $filters['show_bots'] === 'bot' ? 'is_bot = 1' : 'is_bot = 0';
         }
 
-        return 'WHERE ' . implode( ' AND ', $clauses );
+        return $clauses;
     }
 
     private static function build_where( array $filters ): string {
