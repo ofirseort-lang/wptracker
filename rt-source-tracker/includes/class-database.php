@@ -71,15 +71,16 @@ class RT_Database {
         global $wpdb;
         $table  = self::table();
         $where  = self::build_where( $filters );
-        $offset = ( $page - 1 ) * $per_page;
+        [ $per_page, $offset ] = self::paging( $page, $per_page );
 
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        // No $wpdb->prepare() here: $where is built from clauses that were each
+        // already prepare()-escaped individually in build_where(), and $per_page/
+        // $offset are plain PHP ints (see paging()) — nesting them through a second
+        // prepare() call would re-scan text that may itself contain literal %s/%d
+        // sequences (e.g. a filter value containing "%s"), misaligning placeholders.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.QuotedDynamicPlaceholderGeneration
         return $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT * FROM {$table} {$where} ORDER BY created_at DESC LIMIT %d OFFSET %d",
-                $per_page,
-                $offset
-            ),
+            "SELECT * FROM {$table} {$where} ORDER BY created_at DESC LIMIT {$per_page} OFFSET {$offset}",
             ARRAY_A
         );
     }
@@ -128,10 +129,11 @@ class RT_Database {
         global $wpdb;
         $table = self::table();
         $where = self::build_where( $filters );
+        $limit = self::safe_int( $limit, 50000 );
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         return $wpdb->get_results(
-            $wpdb->prepare( "SELECT * FROM {$table} {$where} ORDER BY created_at DESC LIMIT %d", $limit ),
+            "SELECT * FROM {$table} {$where} ORDER BY created_at DESC LIMIT {$limit}",
             ARRAY_A
         );
     }
@@ -141,41 +143,37 @@ class RT_Database {
         $table = self::table();
         $where = self::build_where( $filters );
         $extra = $where ? 'AND referrer IS NOT NULL AND referrer != ""' : 'WHERE referrer IS NOT NULL AND referrer != ""';
+        $limit = self::safe_int( $limit, 10 );
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         return $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT
-                    SUBSTRING_INDEX( SUBSTRING_INDEX( SUBSTRING_INDEX( referrer, '://', -1 ), '/', 1 ), '?', 1 ) AS domain,
-                    COUNT(*) AS total
-                 FROM {$table}
-                 {$where} {$extra}
-                 GROUP BY domain
-                 ORDER BY total DESC
-                 LIMIT %d",
-                $limit
-            ),
+            "SELECT
+                SUBSTRING_INDEX( SUBSTRING_INDEX( SUBSTRING_INDEX( referrer, '://', -1 ), '/', 1 ), '?', 1 ) AS domain,
+                COUNT(*) AS total
+             FROM {$table}
+             {$where} {$extra}
+             GROUP BY domain
+             ORDER BY total DESC
+             LIMIT {$limit}",
             ARRAY_A
         ) ?: [];
     }
 
     public static function get_direct_entry_pages( array $filters = [], int $limit = 10 ): array {
         global $wpdb;
-        $table         = self::table();
+        $table          = self::table();
         $direct_filters = array_merge( $filters, [ 'channel' => 'direct', 'event_type' => 'pageview' ] );
-        $where         = self::build_where( $direct_filters );
+        $where          = self::build_where( $direct_filters );
+        $limit          = self::safe_int( $limit, 10 );
 
         // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
         return $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT page_url, COUNT(*) AS total
-                 FROM {$table}
-                 {$where}
-                 GROUP BY page_url
-                 ORDER BY total DESC
-                 LIMIT %d",
-                $limit
-            ),
+            "SELECT page_url, COUNT(*) AS total
+             FROM {$table}
+             {$where}
+             GROUP BY page_url
+             ORDER BY total DESC
+             LIMIT {$limit}",
             ARRAY_A
         ) ?: [];
     }
@@ -197,45 +195,45 @@ class RT_Database {
 
     public static function get_sessions( array $filters = [], int $page = 1, int $per_page = 20 ): array {
         global $wpdb;
-        $table  = self::table();
+        $table   = self::table();
         $clauses = self::session_filter_clauses( $filters );
-        $where  = 'WHERE session_id IS NOT NULL' . ( $clauses ? ' AND ' . implode( ' AND ', $clauses ) : '' );
-        $offset = ( $page - 1 ) * $per_page;
+        $clauses_sql = $clauses ? ' AND ' . implode( ' AND ', $clauses ) : '';
+        $where   = 'WHERE session_id IS NOT NULL' . $clauses_sql;
+        [ $per_page, $offset ] = self::paging( $page, $per_page );
 
         // entry_page used to be pulled via GROUP_CONCAT(page_url ORDER BY created_at) +
         // SUBSTRING_INDEX, which concatenates every page_url matching the *same*
         // filters before taking the first one — expensive for long sessions and
         // repeated on every 30s admin auto-refresh. A correlated subquery (backed by
         // idx_session_created) only ever reads the one row it needs, but must apply
-        // the same date/channel/bot filters or it can surface an entry page from
-        // outside the filtered window.
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-        $subquery_where = $clauses ? ' AND ' . implode( ' AND ', $clauses ) : '';
-
-        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        // the same date/channel/bot filters ($clauses_sql again) or it can surface an
+        // entry page from outside the filtered window.
+        //
+        // No outer $wpdb->prepare(): $where/$clauses_sql are built from clauses each
+        // already prepare()-escaped in session_filter_clauses(), and $per_page/$offset
+        // are plain PHP ints (see paging()) — nesting through a second prepare() call
+        // would re-scan text that may itself contain literal %s/%d, misaligning
+        // placeholders (e.g. a channel filter value containing "%d").
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.QuotedDynamicPlaceholderGeneration
         return $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT
-                    e.session_id,
-                    MIN(e.created_at)              AS first_seen,
-                    MAX(e.created_at)              AS last_seen,
-                    MIN(e.source_channel)          AS source_channel,
-                    SUM(e.event_type = 'pageview')   AS pageviews,
-                    SUM(e.event_type = 'submission') AS submissions,
-                    (
-                        SELECT e2.page_url FROM {$table} e2
-                        WHERE e2.session_id = e.session_id {$subquery_where}
-                        ORDER BY e2.created_at ASC
-                        LIMIT 1
-                    ) AS entry_page
-                 FROM {$table} e
-                 {$where}
-                 GROUP BY e.session_id
-                 ORDER BY first_seen DESC
-                 LIMIT %d OFFSET %d",
-                $per_page,
-                $offset
-            ),
+            "SELECT
+                e.session_id,
+                MIN(e.created_at)              AS first_seen,
+                MAX(e.created_at)              AS last_seen,
+                MIN(e.source_channel)          AS source_channel,
+                SUM(e.event_type = 'pageview')   AS pageviews,
+                SUM(e.event_type = 'submission') AS submissions,
+                (
+                    SELECT e2.page_url FROM {$table} e2
+                    WHERE e2.session_id = e.session_id {$clauses_sql}
+                    ORDER BY e2.created_at ASC
+                    LIMIT 1
+                ) AS entry_page
+             FROM {$table} e
+             {$where}
+             GROUP BY e.session_id
+             ORDER BY first_seen DESC
+             LIMIT {$per_page} OFFSET {$offset}",
             ARRAY_A
         );
     }
@@ -250,8 +248,26 @@ class RT_Database {
     }
 
     /**
-     * Session-scoped filter clauses, shared between get_sessions()'s outer query and
-     * its per-session entry_page subquery so both agree on which rows are in scope.
+     * Clamp a LIMIT/OFFSET-style value to a non-negative int, defensively — these
+     * end up interpolated directly into SQL text rather than passed through
+     * $wpdb->prepare() (see get_events() etc.), so this cast is what keeps them
+     * numeric-only regardless of what a future caller passes in.
+     */
+    private static function safe_int( int $value, int $default ): int {
+        return $value > 0 ? $value : $default;
+    }
+
+    private static function paging( int $page, int $per_page ): array {
+        $per_page = self::safe_int( $per_page, 20 );
+        $page     = max( 1, $page );
+        return [ $per_page, ( $page - 1 ) * $per_page ];
+    }
+
+    /**
+     * Filter clauses shared by the Events report (build_where(), extended with
+     * event_type/referrer_domain) and the Sessions report (get_sessions()'s outer
+     * query and its per-session entry_page subquery), so all three agree on what
+     * "date range / channel / bot visibility" means for a given set of filters.
      * Each clause is already $wpdb->prepare()-escaped where it embeds a value.
      */
     private static function session_filter_clauses( array $filters ): array {
@@ -276,25 +292,13 @@ class RT_Database {
 
     private static function build_where( array $filters ): string {
         global $wpdb;
-        $clauses = [];
+        $clauses = self::session_filter_clauses( $filters );
 
-        if ( ! empty( $filters['date_from'] ) ) {
-            $clauses[] = $wpdb->prepare( 'created_at >= %s', $filters['date_from'] . ' 00:00:00' );
-        }
-        if ( ! empty( $filters['date_to'] ) ) {
-            $clauses[] = $wpdb->prepare( 'created_at <= %s', $filters['date_to'] . ' 23:59:59' );
-        }
-        if ( ! empty( $filters['channel'] ) ) {
-            $clauses[] = $wpdb->prepare( 'source_channel = %s', $filters['channel'] );
-        }
         if ( ! empty( $filters['event_type'] ) ) {
             $clauses[] = $wpdb->prepare( 'event_type = %s', $filters['event_type'] );
         }
         if ( ! empty( $filters['referrer_domain'] ) ) {
             $clauses[] = $wpdb->prepare( 'referrer LIKE %s', '%' . $wpdb->esc_like( $filters['referrer_domain'] ) . '%' );
-        }
-        if ( isset( $filters['show_bots'] ) && $filters['show_bots'] !== 'all' ) {
-            $clauses[] = $filters['show_bots'] === 'bot' ? 'is_bot = 1' : 'is_bot = 0';
         }
 
         return $clauses ? 'WHERE ' . implode( ' AND ', $clauses ) : '';

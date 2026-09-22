@@ -97,37 +97,16 @@ class RT_Tracker {
         $session_id   = sanitize_text_field( $req->get_param( 'session_id' ) ?? '' );
         $client_channel = sanitize_text_field( $req->get_param( 'channel' ) ?? '' );
 
-        // Skip duplicate pageviews: same session + same URL within 10 seconds
-        if ( $event_type === 'pageview' && $session_id && $page_url ) {
+        // Skip duplicate pageviews: same session + same URL within 10 seconds. Bots
+        // are exempt so a filter that opts into recording them (rtst_record_bot_events)
+        // still sees accurate raw bot-hit counts instead of a deduped undercount.
+        if ( $event_type === 'pageview' && ! $is_bot && $session_id && $page_url ) {
             if ( $this->is_duplicate_pageview( $session_id, $page_url ) ) {
                 return new WP_REST_Response( [ 'ok' => true, 'channel' => 'dedup' ], 200 );
             }
         }
 
-        $channel = RT_Classifier::classify(
-            $referrer,
-            [ 'source' => $utm_source, 'medium' => $utm_medium, 'campaign' => $utm_campaign ],
-            $has_gclid,
-            $has_fbclid
-        );
-
-        // Internal navigation (same-site referrer, no UTM/click-id of its own) carries
-        // no external source signal — classify() already falls back to 'direct' for it,
-        // but tracker.js knows the session's *original* first-touch channel (e.g.
-        // paid_google) and sends it here. Prefer that over the generic fallback.
-        // Note: this endpoint is intentionally unauthenticated (see README), so this
-        // is not an access-control check — `referrer` and `channel` are both plain
-        // POST fields an attacker could set to anything regardless of this condition
-        // (just as gclid=1 already yields paid_google with no restriction at all).
-        // It only decides when to prefer the client's inherited value over a fresh
-        // classification; the in_array() below keeps the stored value one of the
-        // known channels either way.
-        $referrer_host = $referrer ? strtolower( (string) wp_parse_url( $referrer, PHP_URL_HOST ) ) : '';
-        if ( $referrer_host && RT_Classifier::is_own_host( $referrer_host )
-            && $client_channel && in_array( $client_channel, RT_Classifier::all_channels(), true )
-        ) {
-            $channel = $client_channel;
-        }
+        $channel = $this->classify_with_inheritance( $referrer, $utm_source, $utm_medium, $utm_campaign, $has_gclid, $has_fbclid, $client_channel );
 
         RT_Database::insert_event( [
             'event_type'     => $event_type,
@@ -154,13 +133,19 @@ class RT_Tracker {
     // -------------------------------------------------------------------------
 
     public function on_cf7_submit( $contact_form, $result = [] ): void {
-        $status = is_array( $result ) ? ( $result['status'] ?? '' ) : '';
-        // 'mail_sent' and 'mail_failed' both mean the submission passed validation
-        // and isn't spam — only the mail step differs. 'validation_failed' and
-        // 'spam' are not genuine submissions and shouldn't be recorded.
-        if ( ! in_array( $status, [ 'mail_sent', 'mail_failed' ], true ) ) {
-            return;
+        if ( is_array( $result ) && isset( $result['status'] ) ) {
+            // 'mail_sent', 'mail_failed', and 'mail_skipped' (site uses the standard
+            // wpcf7_skip_mail filter to bypass CF7's own mail and process the
+            // submission elsewhere, e.g. a webhook/CRM integration) all mean the
+            // submission passed validation and isn't spam — record all three.
+            // 'validation_failed' and 'spam' are not genuine submissions.
+            if ( ! in_array( $result['status'], [ 'mail_sent', 'mail_failed', 'mail_skipped' ], true ) ) {
+                return;
+            }
         }
+        // No status info (an unexpected $result shape from a nonstandard CF7 version
+        // or wrapper) — fail open and record, matching the pre-1.1.1 behavior of
+        // recording unconditionally, rather than silently dropping every submission.
         $submission = WPCF7_Submission::get_instance();
         if ( ! $submission ) {
             return;
@@ -187,11 +172,6 @@ class RT_Tracker {
             return;
         }
 
-        $channel = sanitize_text_field( $data['_rt_source_channel'] ?? '' );
-        if ( $channel && ! in_array( $channel, RT_Classifier::all_channels(), true ) ) {
-            $channel = ''; // fall through to reclassification below rather than store an arbitrary label
-        }
-
         // Dedup via token: if JS fired the REST /submission call it injected _rt_token
         // into both the REST body and this form POST. The first handler to arrive sets
         // the transient; the second skips. Falls back to inserting if no token (JS off).
@@ -204,35 +184,68 @@ class RT_Tracker {
             set_transient( $tk_key, 'hook', 120 );
         }
 
-        if ( ! $channel ) {
-            // Reconstruct from UTM fields if available
-            $referrer   = sanitize_text_field( $data['_rt_referrer'] ?? '' );
-            $utm_source = sanitize_text_field( $data['_rt_utm_source'] ?? '' );
-            $utm_medium = sanitize_text_field( $data['_rt_utm_medium'] ?? '' );
-            $utm_campaign = sanitize_text_field( $data['_rt_utm_campaign'] ?? '' );
-            $has_gclid  = ! empty( $data['_rt_gclid'] );
-            $has_fbclid = ! empty( $data['_rt_fbclid'] );
+        $referrer       = sanitize_text_field( $data['_rt_referrer'] ?? '' );
+        $utm_source     = sanitize_text_field( $data['_rt_utm_source'] ?? '' );
+        $utm_medium     = sanitize_text_field( $data['_rt_utm_medium'] ?? '' );
+        $utm_campaign   = sanitize_text_field( $data['_rt_utm_campaign'] ?? '' );
+        $has_gclid      = ! empty( $data['_rt_gclid'] );
+        $has_fbclid     = ! empty( $data['_rt_fbclid'] );
+        $client_channel = sanitize_text_field( $data['_rt_source_channel'] ?? '' );
 
-            $channel = RT_Classifier::classify(
-                $referrer,
-                [ 'source' => $utm_source, 'medium' => $utm_medium, 'campaign' => $utm_campaign ],
-                $has_gclid,
-                $has_fbclid
-            );
-        }
+        $channel = $this->classify_with_inheritance( $referrer, $utm_source, $utm_medium, $utm_campaign, $has_gclid, $has_fbclid, $client_channel );
 
         RT_Database::insert_event( [
             'event_type'     => 'submission',
             'page_url'       => esc_url_raw( $data['_rt_page_url'] ?? '' ),
             'form_plugin'    => $plugin,
             'source_channel' => $channel,
-            'utm_source'     => sanitize_text_field( $data['_rt_utm_source'] ?? '' ) ?: null,
-            'utm_medium'     => sanitize_text_field( $data['_rt_utm_medium'] ?? '' ) ?: null,
-            'utm_campaign'   => sanitize_text_field( $data['_rt_utm_campaign'] ?? '' ) ?: null,
-            'referrer'       => sanitize_text_field( $data['_rt_referrer'] ?? '' ) ?: null,
+            'utm_source'     => $utm_source ?: null,
+            'utm_medium'     => $utm_medium ?: null,
+            'utm_campaign'   => $utm_campaign ?: null,
+            'referrer'       => $referrer ?: null,
             'is_bot'         => (int) $is_bot,
             'ip'             => $this->get_client_ip(),
         ] );
+    }
+
+    /**
+     * Classify a visit, preferring a client-declared channel over a fresh
+     * classification when (and only when) the referrer looks like internal
+     * navigation on this site. Shared by the REST path (record_event) and the
+     * form-hook fallback (record_from_hidden_fields) so both trust a client-supplied
+     * channel under the same condition instead of applying it inconsistently.
+     *
+     * Note: this plugin's ingestion endpoints are intentionally unauthenticated (see
+     * README), so this is not an access-control check — every field here is
+     * attacker-suppliable regardless of this condition (just as gclid=1 already
+     * yields paid_google with no restriction at all). It only decides when to prefer
+     * the caller's inherited value over a fresh classification; the in_array() below
+     * keeps the stored value one of the known channels either way.
+     */
+    private function classify_with_inheritance(
+        string $referrer,
+        string $utm_source,
+        string $utm_medium,
+        string $utm_campaign,
+        bool $has_gclid,
+        bool $has_fbclid,
+        string $client_channel
+    ): string {
+        $referrer_host   = $referrer ? strtolower( (string) wp_parse_url( $referrer, PHP_URL_HOST ) ) : '';
+        $is_internal_nav = $referrer_host && RT_Classifier::is_own_host( $referrer_host );
+
+        $channel = RT_Classifier::classify(
+            $is_internal_nav ? '' : $referrer,
+            [ 'source' => $utm_source, 'medium' => $utm_medium, 'campaign' => $utm_campaign ],
+            $has_gclid,
+            $has_fbclid
+        );
+
+        if ( $is_internal_nav && $client_channel && in_array( $client_channel, RT_Classifier::all_channels(), true ) ) {
+            $channel = $client_channel;
+        }
+
+        return $channel;
     }
 
     private function is_bot_request(): bool {

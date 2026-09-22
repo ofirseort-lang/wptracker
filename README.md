@@ -44,6 +44,14 @@ No settings UI for these — wire them from a small mu-plugin or your theme's
 - `add_filter( 'rtst_record_bot_events', '__return_true' );` — store
   bot-flagged events instead of skipping them (restores the pre-1.1.0
   behavior, at the cost of extra table growth from crawler traffic).
+- `add_filter( 'rtst_own_hosts', function ( $hosts ) { $hosts[] = 'www.example.com'; return $hosts; } );`
+  — register additional hostnames the site is reachable under. Internal
+  navigation is only recognized as such when the referrer's host matches
+  `home_url()`, the current request's `Host` header, or one of these — a site
+  reachable under more than one hostname with no canonical redirect enforced
+  (e.g. both `www.example.com` and `example.com` resolve) needs this, or
+  internal links crossing between them get misclassified as external
+  referrals.
 
 ## Notes for production use
 

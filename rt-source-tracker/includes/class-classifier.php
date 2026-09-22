@@ -65,7 +65,10 @@ class RT_Classifier {
     ): string {
         $utm_source = strtolower( trim( $utm['source'] ?? '' ) );
         $utm_medium = strtolower( trim( $utm['medium'] ?? '' ) );
-        $referrer_host = $referrer ? strtolower( (string) parse_url( $referrer, PHP_URL_HOST ) ) : '';
+        // wp_parse_url(), not parse_url() — WP patches several native parse_url()
+        // edge cases, and is_own_host()'s own comparisons use it too; mixing the two
+        // parsers on the same referrer string can make them disagree on unusual URLs.
+        $referrer_host = $referrer ? strtolower( (string) wp_parse_url( $referrer, PHP_URL_HOST ) ) : '';
 
         // A same-site referrer (internal navigation, e.g. a link opened in a new tab
         // with no prior session data to inherit from) isn't an external source — treat
@@ -157,12 +160,21 @@ class RT_Classifier {
     }
 
     /**
-     * Whether $host (already lowercased) is this site's own host. Checks both the
-     * configured home_url() and the Host header of the current request, since a
-     * site reachable under more than one hostname (www vs. non-www, a staging
-     * alias, a mapped domain) would otherwise have document.referrer's host never
-     * match a home_url()-only comparison for perfectly ordinary internal navigation.
-     * Shared by RT_Tracker::record_event() so both places agree on "same site".
+     * Whether $host (already lowercased) is this site's own host. Checks the
+     * configured home_url() and the Host header of the CURRENT request, which
+     * together cover the common case (a canonical redirect keeps home_url() and
+     * the visited host in sync) and, on some requests, a mismatch between them.
+     *
+     * This does NOT know the *referrer page's* host if it differs from both — a
+     * site actually reachable under two hostnames with no canonical redirect
+     * enforced (e.g. both www.example.com and example.com resolve) can still see
+     * a same-site referrer misclassified, because home_url()/HTTP_HOST alone can't
+     * discover a hostname that appears only in the referrer, never in a request to
+     * this server. Register any such additional hostnames explicitly:
+     * `add_filter( 'rtst_own_hosts', fn( $hosts ) => array_merge( $hosts, [ 'www.example.com' ] ) );`
+     *
+     * Shared by RT_Tracker so record_event()/record_from_hidden_fields() and
+     * classify()'s own internal check agree on "same site".
      */
     public static function is_own_host( string $host ): bool {
         if ( ! $host ) {
@@ -174,7 +186,9 @@ class RT_Classifier {
         if ( ! empty( $_SERVER['HTTP_HOST'] ) ) {
             $known_hosts[] = strtolower( sanitize_text_field( wp_unslash( $_SERVER['HTTP_HOST'] ) ) );
         }
-        return in_array( $host, array_filter( $known_hosts ), true );
+        $known_hosts = (array) apply_filters( 'rtst_own_hosts', $known_hosts );
+        $known_hosts = array_filter( array_map( 'strtolower', $known_hosts ) );
+        return in_array( $host, $known_hosts, true );
     }
 
     public static function channel_label( string $channel ): string {

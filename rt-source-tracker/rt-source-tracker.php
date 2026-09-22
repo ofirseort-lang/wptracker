@@ -3,12 +3,35 @@
  * Plugin Name: RT Source Tracker
  * Plugin URI:  https://realtimecollege.co.il
  * Description: Tracks visitor traffic sources (organic, paid, social, LLM/AI) on every page and ties them to form submissions. Supports CF7, Gravity Forms, WPForms, and generic HTML forms.
- * Version:     1.1.1
+ * Version:     1.1.2
  * Author:      Real Time College
  * License:     GPL-2.0-or-later
  * Text Domain: rt-source-tracker
  *
  * Changelog:
+ *   1.1.2 - Fixed the root cause of the same-site-navigation attribution bug:
+ *           tracker.js's session inheritance was reading the last-touch storage
+ *           key (overwritten every pageview) instead of a stable per-session one,
+ *           so a single pageview with no referrer (bookmark, address-bar reentry,
+ *           rel="noreferrer" link) permanently downgraded the rest of the
+ *           session's inherited channel to "direct". Now uses a dedicated
+ *           rt_session_channel key set once per session. Also unified two
+ *           disagreeing "same site" checks in tracker.js (hostname-only vs.
+ *           origin-based) into one. Restored the !$is_bot guard on pageview
+ *           dedup, dropped during the 1.1.1 reordering (only mattered if
+ *           rtst_record_bot_events is enabled). Added the rtst_own_hosts filter
+ *           and fixed is_own_host()'s docblock to stop overclaiming a www/non-www
+ *           fix it didn't fully implement. classify() now uses wp_parse_url()
+ *           consistently (was mixing it with native parse_url()). The form-hook
+ *           fallback now applies the same internal-navigation gate as the REST
+ *           path before trusting a client-declared channel, instead of trusting
+ *           it unconditionally. CF7 fallback now also accepts the mail_skipped
+ *           status (wpcf7_skip_mail sites) and fails open on an unexpected
+ *           $result shape instead of silently dropping every submission. Removed
+ *           nested $wpdb->prepare() calls across get_events()/get_all_for_export()/
+ *           get_top_referrer_domains()/get_direct_entry_pages()/get_sessions() —
+ *           a filter value containing a literal %s/%d was re-interpreted as a
+ *           placeholder by the outer prepare() call, misaligning LIMIT/OFFSET.
  *   1.1.1 - Fixed a 1.1.0 regression where a bot's REST submission could claim the
  *           dedup slot and suppress the real form-hook row (bot check now runs
  *           before the dedup claim); added the same bot-skip guard to the
@@ -37,7 +60,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'RTST_VERSION', '1.1.1' );
+define( 'RTST_VERSION', '1.1.2' );
 define( 'RTST_PLUGIN_FILE', __FILE__ );
 define( 'RTST_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'RTST_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

@@ -51,10 +51,20 @@
         return /(?:^|\.)google\.[a-z]{2,}(?:\.[a-z]{2})?$/.test( host );
     }
 
+    // Single definition of "same site" used everywhere below — mirrors
+    // RT_Classifier::is_own_host() on the PHP side (hostname only, scheme-agnostic).
+    // A second, stricter origin-based (scheme+host+port) check used to gate session
+    // inheritance separately from this one; the two could disagree on an http/https
+    // mismatch for the same host and silently wipe out a session's real channel, so
+    // there is now exactly one check.
+    function isOwnHost( host ) {
+        return !! host && host === window.location.hostname.toLowerCase();
+    }
+
     function classify( referrer, utm, gclid, fbclid ) {
         let refHost = '';
         try { refHost = referrer ? new URL( referrer ).hostname.toLowerCase() : ''; } catch (_) {}
-        if ( refHost && refHost === window.location.hostname.toLowerCase() ) refHost = '';
+        if ( isOwnHost( refHost ) ) refHost = '';
         const src     = ( utm.source || '' ).toLowerCase();
         const med     = ( utm.medium || '' ).toLowerCase();
 
@@ -98,24 +108,37 @@
         }
     } catch (_) {}
 
-    // If navigating within the same site with no UTMs, inherit the session's original
-    // channel instead of reclassifying internal navigation as "referral"
-    let isSameOrigin = false;
-    if ( referrer ) {
-        try { isSameOrigin = new URL( referrer ).origin === window.location.origin; } catch (_) {}
-    }
+    // If navigating within the same site with no UTMs, inherit the channel this
+    // session started with instead of reclassifying internal navigation as
+    // "referral" (or worse: a mid-session pageview with no referrer at all — a
+    // bookmark, address-bar reentry, a rel="noreferrer" link — reclassifying to
+    // "direct").
+    //
+    // This reads a dedicated key (rt_session_channel) that is written ONCE, on the
+    // session's first pageview, and never touched again. It intentionally does NOT
+    // read `rt_source` below, which is overwritten on every single pageview: doing
+    // so would make one direct-looking mid-session hit permanently downgrade every
+    // later pageview's inherited channel too, since each would inherit the previous
+    // page's (already-corrupted) value instead of the session's original one.
+    let refHost = '';
+    try { refHost = referrer ? new URL( referrer ).hostname.toLowerCase() : ''; } catch (_) {}
+    const isInternalNav = isOwnHost( refHost );
+
+    let sessionChannel = '';
+    try { sessionChannel = sessionStorage.getItem( 'rt_session_channel' ) || ''; } catch (_) {}
 
     let channel;
-    if ( isSameOrigin && ! utm.source && ! utm.medium && ! gclid && ! fbclid ) {
-        try {
-            const prev = JSON.parse( sessionStorage.getItem( 'rt_source' ) || '{}' );
-            channel = prev.channel || classify( referrer, utm, gclid, fbclid );
-        } catch (_) {
-            channel = classify( referrer, utm, gclid, fbclid );
-        }
+    if ( isInternalNav && ! utm.source && ! utm.medium && ! gclid && ! fbclid && sessionChannel ) {
+        channel = sessionChannel;
     } else {
         channel = classify( referrer, utm, gclid, fbclid );
     }
+
+    try {
+        if ( ! sessionChannel ) {
+            sessionStorage.setItem( 'rt_session_channel', channel );
+        }
+    } catch (_) {}
 
     // -----------------------------------------------------------------------
     // Persistence
@@ -156,8 +179,8 @@
             gclid:        gclid,
             fbclid:       fbclid,
             session_id:   sessionId,
-            // Session-inherited channel (see isSameOrigin block above) — lets the
-            // server preserve the original first-touch channel across same-site
+            // Session-inherited channel (see rt_session_channel block above) — lets
+            // the server preserve the session's original channel across same-site
             // navigation instead of reclassifying from a same-site referrer alone.
             channel:      channel,
         }, extra );
