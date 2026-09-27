@@ -64,7 +64,53 @@ class RT_Database {
         ];
 
         $result = $wpdb->insert( self::table(), $row );
+        if ( $result === false ) {
+            // $wpdb->insert() never throws on failure — it returns false and sets
+            // $wpdb->last_error. Surfacing that here (rather than relying on callers
+            // to check the return value, which none of them did) is what actually
+            // makes a DB-level failure visible via RT_Health::get_status() at all.
+            RT_Health::log_issue( 'insert_event', $wpdb->last_error ?: 'wpdb->insert() returned false' );
+        }
         return $result !== false;
+    }
+
+    /**
+     * Row count and disk size for this plugin's own table — a real signal for "is
+     * this plugin's own data bloating the DB", surfaced via RT_Health. Cached
+     * briefly: table size changes on the order of minutes/hours, not seconds, so an
+     * external monitor polling /health frequently shouldn't hit information_schema
+     * on every request.
+     */
+    public static function get_table_stats(): ?array {
+        global $wpdb;
+        $cache_key = 'rtst_table_stats';
+        $cached    = get_transient( $cache_key );
+        if ( $cached !== false ) {
+            return $cached;
+        }
+
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT table_rows, data_length, index_length
+                 FROM information_schema.tables
+                 WHERE table_schema = %s AND table_name = %s",
+                DB_NAME,
+                self::table()
+            ),
+            ARRAY_A
+        );
+
+        $stats = $row ? [
+            // table_rows from information_schema is an estimate for InnoDB, not an
+            // exact COUNT(*) — fine for a growth trend, not for precision.
+            'approx_rows'   => (int) $row['table_rows'],
+            'data_size_mb'  => round( ( (int) $row['data_length'] ) / 1048576, 2 ),
+            'index_size_mb' => round( ( (int) $row['index_length'] ) / 1048576, 2 ),
+        ] : null;
+
+        set_transient( $cache_key, $stats, MINUTE_IN_SECONDS );
+        return $stats;
     }
 
     public static function get_events( array $filters = [], int $page = 1, int $per_page = 20 ): array {

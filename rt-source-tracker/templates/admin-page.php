@@ -428,6 +428,56 @@
         </p>
     </div>
 
+    <!-- ------------------------------------------------------------------ -->
+    <!-- System Health                                                         -->
+    <!-- ------------------------------------------------------------------ -->
+    <div style="margin-top:16px;padding:16px 20px;background:#fff;border:1px solid #ddd;border-radius:6px;max-width:600px;">
+        <h2 style="font-size:14px;font-weight:600;margin:0 0 4px;"><?php esc_html_e( 'System Health', 'rt-source-tracker' ); ?></h2>
+        <p style="margin:0 0 12px;color:#646970;font-size:12px;">
+            <?php esc_html_e( "This plugin's own footprint only — not full server monitoring. Also available at GET /wp-json/rt-tracker/v1/health.", 'rt-source-tracker' ); ?>
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:20px;font-size:13px;">
+            <div>
+                <div style="color:#646970;font-size:11px;text-transform:uppercase;letter-spacing:.5px;"><?php esc_html_e( 'Load Avg (1/5/15m)', 'rt-source-tracker' ); ?></div>
+                <div style="font-weight:600;">
+                    <?php echo $health['load_avg']
+                        ? esc_html( sprintf( '%.2f / %.2f / %.2f', $health['load_avg']['1m'], $health['load_avg']['5m'], $health['load_avg']['15m'] ) )
+                        : esc_html__( 'unavailable', 'rt-source-tracker' ); ?>
+                </div>
+            </div>
+            <div>
+                <div style="color:#646970;font-size:11px;text-transform:uppercase;letter-spacing:.5px;"><?php esc_html_e( 'PHP Memory', 'rt-source-tracker' ); ?></div>
+                <div style="font-weight:600;">
+                    <?php echo esc_html( size_format( $health['php']['memory_usage'] ) . ' / ' . $health['php']['memory_limit'] ); ?>
+                </div>
+            </div>
+            <div>
+                <div style="color:#646970;font-size:11px;text-transform:uppercase;letter-spacing:.5px;"><?php esc_html_e( 'Table Size', 'rt-source-tracker' ); ?></div>
+                <div style="font-weight:600;">
+                    <?php echo $health['table']
+                        ? esc_html( number_format( $health['table']['approx_rows'] ) . ' rows / ' . $health['table']['data_size_mb'] . ' MB' )
+                        : esc_html__( 'unavailable', 'rt-source-tracker' ); ?>
+                </div>
+            </div>
+        </div>
+        <?php if ( ! empty( $health['recent_errors'] ) ) : ?>
+        <div style="margin-top:14px;">
+            <div style="color:#c0392b;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">
+                <?php esc_html_e( 'Recent Plugin Errors', 'rt-source-tracker' ); ?>
+            </div>
+            <table style="width:100%;font-size:12px;border-collapse:collapse;">
+                <?php foreach ( array_reverse( $health['recent_errors'] ) as $err ) : ?>
+                <tr>
+                    <td style="padding:3px 8px 3px 0;color:#646970;white-space:nowrap;vertical-align:top;"><?php echo esc_html( $err['time'] ); ?></td>
+                    <td style="padding:3px 8px 3px 0;color:#1d2327;font-weight:600;white-space:nowrap;vertical-align:top;"><?php echo esc_html( $err['context'] ); ?></td>
+                    <td style="padding:3px 0;color:#646970;word-break:break-all;"><?php echo esc_html( $err['message'] ); ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+        </div>
+        <?php endif; ?>
+    </div>
+
     <script>
     ( function () {
         var palette = [ '#fff8e1', '#e8f5e9', '#e3f2fd', '#fce4ec', '#f3e5f5', '#e0f7fa', '#fff3e0' ];

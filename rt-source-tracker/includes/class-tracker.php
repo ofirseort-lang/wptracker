@@ -47,7 +47,27 @@ class RT_Tracker {
         return $this->record_event( $req, 'submission' );
     }
 
+    /**
+     * Anything unexpected inside record_event_unsafe() (a classification bug, a
+     * malformed request triggering a TypeError, etc.) would otherwise surface as a
+     * fatal REST response. Catch it, log it to RT_Health so it's visible via
+     * GET /wp-json/rt-tracker/v1/health, and degrade gracefully instead.
+     *
+     * Note: a $wpdb->insert() failure specifically does NOT come through here —
+     * WordPress's DB layer returns false rather than throwing, so that failure
+     * mode is caught and logged separately, inside RT_Database::insert_event()
+     * itself (see there for why).
+     */
     private function record_event( WP_REST_Request $req, string $event_type ): WP_REST_Response {
+        try {
+            return $this->record_event_unsafe( $req, $event_type );
+        } catch ( \Throwable $e ) {
+            RT_Health::log_error( "record_event:{$event_type}", $e );
+            return new WP_REST_Response( [ 'ok' => false, 'error' => 'internal_error' ], 500 );
+        }
+    }
+
+    private function record_event_unsafe( WP_REST_Request $req, string $event_type ): WP_REST_Response {
         $ip = $this->get_client_ip();
 
         // Nonce isn't required (cached pages serve a stale one, see wp_enqueue_scripts
@@ -74,7 +94,15 @@ class RT_Tracker {
         }
 
         // Dedup: if JS sent a token and the PHP server-side hook already inserted
-        // this submission, skip to avoid a duplicate row.
+        // this submission, skip to avoid a duplicate row. This claims the slot
+        // BEFORE the insert below, which is the correct trade-off: claiming after
+        // would reopen a race where both this path and the hook fallback pass the
+        // "not yet claimed" check simultaneously and both insert (a duplicate row —
+        // the common case, since both paths often fire nearly at once by design).
+        // The cost is the rarer case where the insert below fails for some reason:
+        // the slot stays claimed and the hook fallback also skips, losing the event
+        // entirely rather than duplicating it. insert_event() logs that failure via
+        // RT_Health so it's at least visible, even though it isn't retried.
         if ( $event_type === 'submission' ) {
             $token = sanitize_text_field( $req->get_param( 'submission_token' ) ?? '' );
             if ( $token ) {
@@ -132,35 +160,54 @@ class RT_Tracker {
     // tracker.js injects into every form before submit.
     // -------------------------------------------------------------------------
 
+    // Each hook below wraps its ENTIRE body in try/catch, not just the shared
+    // record_from_hidden_fields() call — these run inside another plugin's own
+    // submit-processing hook (CF7/GF/WPForms), so an uncaught error anywhere in
+    // here, including CF7's own WPCF7_Submission lookup, could break that plugin's
+    // form handling for the visitor, not just our own tracking. Log and move on.
+
     public function on_cf7_submit( $contact_form, $result = [] ): void {
-        if ( is_array( $result ) && isset( $result['status'] ) ) {
-            // 'mail_sent', 'mail_failed', and 'mail_skipped' (site uses the standard
-            // wpcf7_skip_mail filter to bypass CF7's own mail and process the
-            // submission elsewhere, e.g. a webhook/CRM integration) all mean the
-            // submission passed validation and isn't spam — record all three.
-            // 'validation_failed' and 'spam' are not genuine submissions.
-            if ( ! in_array( $result['status'], [ 'mail_sent', 'mail_failed', 'mail_skipped' ], true ) ) {
+        try {
+            if ( is_array( $result ) && isset( $result['status'] ) ) {
+                // 'mail_sent', 'mail_failed', and 'mail_skipped' (site uses the
+                // standard wpcf7_skip_mail filter to bypass CF7's own mail and
+                // process the submission elsewhere, e.g. a webhook/CRM integration)
+                // all mean the submission passed validation and isn't spam — record
+                // all three. 'validation_failed' and 'spam' are not genuine
+                // submissions.
+                if ( ! in_array( $result['status'], [ 'mail_sent', 'mail_failed', 'mail_skipped' ], true ) ) {
+                    return;
+                }
+            }
+            // No status info (an unexpected $result shape from a nonstandard CF7
+            // version or wrapper) — fail open and record, matching the pre-1.1.1
+            // behavior of recording unconditionally, rather than silently dropping
+            // every submission.
+            $submission = WPCF7_Submission::get_instance();
+            if ( ! $submission ) {
                 return;
             }
+            $this->record_from_hidden_fields( $submission->get_posted_data(), 'cf7' );
+        } catch ( \Throwable $e ) {
+            RT_Health::log_error( 'on_cf7_submit', $e );
         }
-        // No status info (an unexpected $result shape from a nonstandard CF7 version
-        // or wrapper) — fail open and record, matching the pre-1.1.1 behavior of
-        // recording unconditionally, rather than silently dropping every submission.
-        $submission = WPCF7_Submission::get_instance();
-        if ( ! $submission ) {
-            return;
-        }
-        $posted = $submission->get_posted_data();
-        $this->record_from_hidden_fields( $posted, 'cf7' );
     }
 
     public function on_gf_submit( $entry, $form ): void {
-        // Gravity Forms stores posted data in $_POST
-        $this->record_from_hidden_fields( $_POST, 'gravityforms' ); // phpcs:ignore WordPress.Security.NonceVerification
+        try {
+            // Gravity Forms stores posted data in $_POST
+            $this->record_from_hidden_fields( $_POST, 'gravityforms' ); // phpcs:ignore WordPress.Security.NonceVerification
+        } catch ( \Throwable $e ) {
+            RT_Health::log_error( 'on_gf_submit', $e );
+        }
     }
 
     public function on_wpf_submit( $fields, $entry, $form_data, $entry_id ): void {
-        $this->record_from_hidden_fields( $_POST, 'wpforms' ); // phpcs:ignore WordPress.Security.NonceVerification
+        try {
+            $this->record_from_hidden_fields( $_POST, 'wpforms' ); // phpcs:ignore WordPress.Security.NonceVerification
+        } catch ( \Throwable $e ) {
+            RT_Health::log_error( 'on_wpf_submit', $e );
+        }
     }
 
     private function record_from_hidden_fields( array $data, string $plugin ): void {
@@ -175,6 +222,9 @@ class RT_Tracker {
         // Dedup via token: if JS fired the REST /submission call it injected _rt_token
         // into both the REST body and this form POST. The first handler to arrive sets
         // the transient; the second skips. Falls back to inserting if no token (JS off).
+        // Same claim-before-insert trade-off as the REST path (see record_event_unsafe):
+        // prevents a duplicate row in the common case at the cost of losing the event
+        // (rather than duplicating it) in the rarer case where the insert below fails.
         $token = sanitize_text_field( $data['_rt_token'] ?? '' );
         if ( $token ) {
             $tk_key = $this->dedup_key( $token );

@@ -3,12 +3,36 @@
  * Plugin Name: RT Source Tracker
  * Plugin URI:  https://realtimecollege.co.il
  * Description: Tracks visitor traffic sources (organic, paid, social, LLM/AI) on every page and ties them to form submissions. Supports CF7, Gravity Forms, WPForms, and generic HTML forms.
- * Version:     1.1.2
+ * Version:     1.2.0
  * Author:      Real Time College
  * License:     GPL-2.0-or-later
  * Text Domain: rt-source-tracker
  *
  * Changelog:
+ *   1.2.0 - Added GET /wp-json/rt-tracker/v1/health (requires manage_options):
+ *           system load average, PHP memory usage, this plugin's own table
+ *           size/row count, and a capped log of errors caught inside this
+ *           plugin's own code — also now shown directly on the Tools ->
+ *           Source Tracker admin page (System Health section), not just the
+ *           raw REST endpoint. Table size is cached briefly (1 min) so a
+ *           monitor polling /health doesn't hit information_schema every
+ *           request. RT_Database::insert_event() now logs a failed
+ *           $wpdb->insert() (which returns false rather than throwing, so the
+ *           try/catch below can't see it) — this is the failure mode most
+ *           likely to actually occur, and previously would have gone
+ *           completely unrecorded despite the "gets logged" claim below.
+ *           Error logging itself is throttled to at most one persisted write
+ *           per 10s, so a sustained failure (e.g. a DB outage) doesn't turn
+ *           every request into its own extra options-table write on top of
+ *           the original failure. The REST entry points
+ *           (handle_pageview/handle_submission) and each form-plugin hook
+ *           (CF7/Gravity Forms/WPForms) are now wrapped in try/catch
+ *           individually at the actual hook boundary — not one layer deeper,
+ *           which had left CF7's own WPCF7_Submission lookup unprotected —
+ *           so a failure degrades gracefully (a 500 JSON response on the
+ *           REST path, a silent skip on the form-hook path so it can't break
+ *           another plugin's own form handling) instead of fataling or
+ *           vanishing.
  *   1.1.2 - Fixed the root cause of the same-site-navigation attribution bug:
  *           tracker.js's session inheritance was reading the last-touch storage
  *           key (overwritten every pageview) instead of a stable per-session one,
@@ -60,13 +84,14 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'RTST_VERSION', '1.1.2' );
+define( 'RTST_VERSION', '1.2.0' );
 define( 'RTST_PLUGIN_FILE', __FILE__ );
 define( 'RTST_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'RTST_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 
 require_once RTST_PLUGIN_DIR . 'includes/class-database.php';
 require_once RTST_PLUGIN_DIR . 'includes/class-classifier.php';
+require_once RTST_PLUGIN_DIR . 'includes/class-health.php';
 require_once RTST_PLUGIN_DIR . 'includes/class-tracker.php';
 require_once RTST_PLUGIN_DIR . 'includes/class-admin.php';
 
@@ -97,6 +122,9 @@ add_action( 'plugins_loaded', function () {
 
     $admin = new RT_Admin();
     $admin->init();
+
+    $health = new RT_Health();
+    $health->init();
 } );
 
 add_action( 'admin_init', function () {

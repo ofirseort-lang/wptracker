@@ -5,6 +5,11 @@ class RT_Admin {
 
     const PER_PAGE = 20;
 
+    // Shared with RT_Health so the REST health endpoint and this admin page agree
+    // on who's allowed to see either one, instead of five independent literal
+    // 'manage_options' strings across two files that could silently drift apart.
+    const CAPABILITY = 'manage_options';
+
     public function init(): void {
         add_action( 'admin_menu', [ $this, 'add_menu' ] );
         add_action( 'admin_init', [ $this, 'handle_csv_export' ] );
@@ -15,14 +20,14 @@ class RT_Admin {
         add_management_page(
             __( 'Source Tracker', 'rt-source-tracker' ),
             __( 'Source Tracker', 'rt-source-tracker' ),
-            'manage_options',
+            self::CAPABILITY,
             'rt-source-tracker',
             [ $this, 'render_page' ]
         );
     }
 
     public function render_page(): void {
-        if ( ! current_user_can( 'manage_options' ) ) {
+        if ( ! current_user_can( self::CAPABILITY ) ) {
             return;
         }
 
@@ -41,12 +46,13 @@ class RT_Admin {
 
         $top_referrers = RT_Database::get_top_referrer_domains( $filters );
         $direct_pages  = RT_Database::get_direct_entry_pages( $filters );
+        $health        = RT_Health::get_status();
 
         include RTST_PLUGIN_DIR . 'templates/admin-page.php';
     }
 
     public function handle_csv_export(): void {
-        if ( empty( $_GET['rt_export_csv'] ) || ! current_user_can( 'manage_options' ) ) {
+        if ( empty( $_GET['rt_export_csv'] ) || ! current_user_can( self::CAPABILITY ) ) {
             return;
         }
         if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ?? '' ) ), 'rt_export_csv' ) ) {
@@ -102,7 +108,7 @@ class RT_Admin {
 
     public function handle_retention(): void {
         if ( ( empty( $_POST['rt_save_retention'] ) && empty( $_POST['rt_purge_now'] ) )
-            || ! current_user_can( 'manage_options' ) ) {
+            || ! current_user_can( self::CAPABILITY ) ) {
             return;
         }
         if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce_retention'] ?? '' ) ), 'rt_retention_settings' ) ) {

@@ -30,6 +30,17 @@ it from the WordPress admin Plugins screen.
   [`templates/admin-page.php`](rt-source-tracker/templates/admin-page.php)
   render the Tools → Source Tracker dashboard (events, sessions, CSV export,
   retention settings).
+- [`includes/class-health.php`](rt-source-tracker/includes/class-health.php)
+  exposes `GET /wp-json/rt-tracker/v1/health` (requires `manage_options` —
+  works with a logged-in admin session or an Application Password for an
+  administrator account) reporting system load average, PHP memory usage,
+  this plugin's own table size/row count, and any errors caught inside this
+  plugin's own code paths. The same data is also shown directly on the
+  Tools → Source Tracker admin page (System Health section) — the REST
+  endpoint is there for external monitors/automation, not the only way to
+  see it. It has no visibility into other plugins, the web server, or
+  MySQL's slow query log — that requires real server access (SSH or the
+  hosting panel).
 
 ## Configuration hooks
 
