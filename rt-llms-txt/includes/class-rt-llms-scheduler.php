@@ -134,6 +134,11 @@ class RT_LLMS_Scheduler {
 		update_option( 'rt_llms_log', array_slice( $log, -self::LOG_LIMIT ), false );
 	}
 
+	/** Ask for a rebuild at the end of this request (FR-24a). */
+	public static function mark_dirty() {
+		self::$dirty = true;
+	}
+
 	public static function on_transition( $new, $old, $post ) {
 		if ( 'publish' === $old && 'publish' !== $new && in_array( $post->post_type, RT_LLMS_Settings::get()['post_types'], true ) ) {
 			self::$dirty = true;
